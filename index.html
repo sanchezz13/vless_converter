@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Конвертер JSON → vless://</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f6f7f9; color: #222; }
+  h1 { font-size: 1.6rem; margin-bottom: 8px; }
+  p { color: #555; margin-top: 0; }
+  textarea { width: 100%; height: 280px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; resize: vertical; }
+  button { background: #2563eb; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 15px; margin: 8px 6px 0 0; }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #64748b; }
+  button.secondary:hover { background: #475569; }
+  .output { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-top: 16px; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-height: 120px; max-height: 500px; overflow-y: auto; }
+  .count { font-weight: 600; color: #16a34a; margin-top: 8px; }
+  .error { color: #dc2626; margin-top: 10px; }
+  .success { color: #16a34a; }
+  .hint { font-size: 0.9rem; color: #666; margin-top: 20px; }
+  label { font-weight: 600; display: block; margin: 16px 0 6px; }
+</style>
+</head>
+<body>
+<h1>Конвертер Xray JSON → ссылка vless://</h1>
+<p>Вставьте полный JSON-конфиг Xray и получите <b>все</b> ссылки <code>vless://</code>. Автоматически добавляет флаг страны по домену, если удаётся определить.</p>
+
+<label for="jsonInput">JSON конфигурация:</label>
+<textarea id="jsonInput" placeholder='Вставьте JSON здесь, например:
+{
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {
+      "vnext": [{
+        "address": "example.com",
+        "port": 443,
+        "users": [{
+          "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+          "encryption": "none",
+          "flow": "xtls-rprx-vision"
+        }]
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "serverName": "www.microsoft.com",
+        "fingerprint": "chrome",
+        "publicKey": "....",
+        "shortId": "...."
+      }
+    },
+    "tag": "MyServer"
+  }]
+}'></textarea>
+
+<div>
+  <button onclick="convert()">Конвертировать все</button>
+  <button class="secondary" onclick="copyLink()">Копировать все ссылки</button>
+  <button class="secondary" onclick="clearAll()">Очистить</button>
+</div>
+
+<div id="status"></div>
+<div class="output" id="output">Ссылки появятся здесь</div>
+<div class="count" id="count"></div>
+
+<div class="hint">
+  Поддерживаются: TLS, Reality, TCP/raw, WebSocket, gRPC, XHTTP, flow, fingerprint, SNI, ALPN и основные параметры.<br>
+  Если в конфиге несколько VLESS-серверов — будут выданы все. Флаг страны определяется по домену (nl, de, es, uk, cz и т.д.).
+</div>
+
+<script>
+const COUNTRY_MAP = [
+  [/(^|\.)nl[\.-]|nlcloud|nl-global|cdn13-nl|nl3-cdn/i, '🇳🇱 NL'],
+  [/(^|\.)de[\.-]|de\.|ultrafastcloud|cloudconnect/i, '🇩🇪 DE'],
+  [/(^|\.)es[\.-]|escloud/i, '🇪🇸 ES'],
+  [/(^|\.)uk[\.-]|uk-central/i, '🇬🇧 UK'],
+  [/(^|\.)cz[\.-]|czcdn/i, '🇨🇿 CZ'],
+  [/(^|\.)ch[\.-]|swi-|switzerland/i, '🇨🇭 CH'],
+  [/(^|\.)ro[\.-]|bucha|bucharest/i, '🇷🇴 RO'],
+  [/anycast/i, '🌐 Anycast'],
+  [/bl[0-9]?-mws|belarus/i, '🇧🇾 BY'],
+  [/(^|\.)pl[\.-]/i, '🇵🇱 PL'],
+  [/(^|\.)fi[\.-]/i, '🇫🇮 FI'],
+  [/(^|\.)se[\.-]/i, '🇸🇪 SE'],
+  [/(^|\.)us[\.-]|usa/i, '🇺🇸 US'],
+  [/(^|\.)sg[\.-]/i, '🇸🇬 SG'],
+  [/(^|\.)jp[\.-]/i, '🇯🇵 JP'],
+  [/(^|\.)hk[\.-]/i, '🇭🇰 HK'],
+  [/(^|\.)tr[\.-]/i, '🇹🇷 TR'],
+];
+
+function detectCountry(address, sni) {
+  const text = ((address || '') + ' ' + (sni || '')).toLowerCase();
+  for (const [re, label] of COUNTRY_MAP) {
+    if (re.test(text)) return label;
+  }
+  return '';
+}
+
+function get(obj, path, def) {
+  return path.split('.').reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj) ?? def;
+}
+
+function convertOutbound(outbound) {
+  const vnext = get(outbound, 'settings.vnext.0', {});
+  const user = get(vnext, 'users.0', {});
+  const address = vnext.address || '';
+  const port = vnext.port || 443;
+  const uuid = user.id || '';
+  const encryption = user.encryption || 'none';
+  const flow = user.flow || '';
+
+  if (!uuid || !address) return null;
+
+  const stream = outbound.streamSettings || {};
+  let network = stream.network || stream.method || 'tcp';
+  if (network === 'raw') network = 'tcp';
+
+  const security = stream.security || 'none';
+
+  const params = new URLSearchParams();
+  params.set('encryption', encryption);
+  if (flow) params.set('flow', flow);
+  params.set('type', network);
+  params.set('security', security);
+
+  let sni = '';
+
+  if (security === 'tls') {
+    const tls = stream.tlsSettings || {};
+    sni = tls.serverName || '';
+    if (sni) params.set('sni', sni);
+    if (tls.fingerprint) params.set('fp', tls.fingerprint);
+    if (Array.isArray(tls.alpn) && tls.alpn.length) params.set('alpn', tls.alpn.join(','));
+    if (tls.allowInsecure === true) params.set('allowInsecure', '1');
+  }
+
+  if (security === 'reality') {
+    const reality = stream.realitySettings || {};
+    sni = reality.serverName || '';
+    if (sni) params.set('sni', sni);
+    if (reality.fingerprint) params.set('fp', reality.fingerprint);
+    if (reality.publicKey) params.set('pbk', reality.publicKey);
+    if (reality.shortId) params.set('sid', reality.shortId);
+    if (reality.spiderX) params.set('spx', reality.spiderX);
+  }
+
+  if (network === 'ws' || network === 'websocket') {
+    const ws = stream.wsSettings || {};
+    if (ws.path) params.set('path', ws.path);
+    if (ws.host) params.set('host', ws.host);
+    else if (ws.headers && ws.headers.Host) params.set('host', ws.headers.Host);
+  } else if (network === 'grpc') {
+    const grpc = stream.grpcSettings || {};
+    if (grpc.serviceName) params.set('serviceName', grpc.serviceName);
+    if (grpc.authority) params.set('authority', grpc.authority);
+  } else if (network === 'xhttp' || network === 'splithttp') {
+    const xhttp = stream.xhttpSettings || stream.splithttpSettings || {};
+    if (xhttp.path) params.set('path', xhttp.path);
+    if (xhttp.host) params.set('host', xhttp.host);
+    if (xhttp.mode) params.set('mode', xhttp.mode);
+    if (xhttp.extra) params.set('extra', typeof xhttp.extra === 'string' ? xhttp.extra : JSON.stringify(xhttp.extra));
+  } else if (network === 'httpupgrade') {
+    const hu = stream.httpupgradeSettings || {};
+    if (hu.path) params.set('path', hu.path);
+    if (hu.host) params.set('host', hu.host);
+  }
+
+  const tag = outbound.tag || outbound.ps || address;
+  const country = detectCountry(address, sni);
+  const remark = country ? `${country} | ${tag}` : tag;
+
+  const query = params.toString();
+  return `vless://${uuid}@${address}:${port}${query ? '?' + query : ''}#${encodeURIComponent(remark)}`;
+}
+
+function convert() {
+  const input = document.getElementById('jsonInput').value.trim();
+  const status = document.getElementById('status');
+  const output = document.getElementById('output');
+  const countEl = document.getElementById('count');
+  status.innerHTML = '';
+  output.textContent = '';
+  countEl.textContent = '';
+
+  if (!input) {
+    status.innerHTML = '<div class="error">Вставьте JSON.</div>';
+    return;
+  }
+
+  let config;
+  try {
+    config = JSON.parse(input);
+  } catch (e) {
+    status.innerHTML = '<div class="error">Ошибка разбора JSON: ' + e.message + '</div>';
+    return;
+  }
+
+  let outbounds = [];
+  if (Array.isArray(config.outbounds)) {
+    outbounds = config.outbounds.filter(o => o.protocol === 'vless');
+  } else if (config.protocol === 'vless') {
+    outbounds = [config];
+  } else if (config.settings && config.settings.vnext) {
+    outbounds = [config];
+  }
+
+  if (!outbounds.length) {
+    status.innerHTML = '<div class="error">Не найдено ни одного outbound с protocol: "vless".</div>';
+    return;
+  }
+
+  const links = outbounds.map(convertOutbound).filter(Boolean);
+
+  if (!links.length) {
+    status.innerHTML = '<div class="error">Не удалось сформировать ни одной ссылки.</div>';
+    return;
+  }
+
+  output.textContent = links.join('\n');
+  countEl.textContent = `Всего ссылок: ${links.length}`;
+  status.innerHTML = '<div class="success">Готово!</div>';
+}
+
+function copyLink() {
+  const text = document.getElementById('output').textContent;
+  if (!text || text.startsWith('Ссылки')) {
+    alert('Сначала сконвертируйте JSON.');
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    document.getElementById('status').innerHTML = '<div class="success">Все ссылки скопированы!</div>';
+  }).catch(() => alert('Не удалось скопировать. Выделите текст вручную.'));
+}
+
+function clearAll() {
+  document.getElementById('jsonInput').value = '';
+  document.getElementById('output').textContent = 'Ссылки появятся здесь';
+  document.getElementById('count').textContent = '';
+  document.getElementById('status').innerHTML = '';
+}
+</script>
+</body>
+</html>
