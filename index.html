@@ -169,7 +169,19 @@ function convertOutbound(outbound) {
 
   const tag = outbound.tag || outbound.ps || address;
   const country = detectCountry(address, sni);
-  const remark = country ? `${country} | ${tag}` : tag;
+
+  // Игнорируем служебные теги (wifi, wifi-2, lte, p1 и т.п.)
+  const uselessTag = /^(wifi|lte|p\d+|server|proxy|node)(-\d+)?$/i.test(tag);
+
+  let remark;
+  if (country) {
+    remark = country;
+    if (!uselessTag && tag && tag !== address) {
+      remark += ' | ' + tag;
+    }
+  } else {
+    remark = tag;
+  }
 
   const query = params.toString();
   return `vless://${uuid}@${address}:${port}${query ? '?' + query : ''}#${encodeURIComponent(remark)}`;
